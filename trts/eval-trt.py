@@ -11,18 +11,16 @@ from threading import Thread
 
 import numpy as np
 import torch
-import yaml
 from tqdm import tqdm
 from trains.modules import *
 from ultralytics.utils.metrics import box_iou
 # from models.yolo import Model
 # from models.experimental import attempt_load
-# from utils.datasets import create_dataloader
 from ultralytics.utils.ops import non_max_suppression, scale_boxes, xyxy2xywh, xywh2xyxy
-from metrics import bbox_iou,ap_per_class,ConfusionMatrix
+from metrics import ap_per_class, ConfusionMatrix
 from ultralytics.utils.plotting import plot_images, output_to_target
 # from utils.torch_utils import select_device, TracedModel
-from datasets import create_dataloader
+from ultralytics.data import build_yolo_dataset
 import time
 import pycuda.autoinit
 import pycuda.driver as cuda
@@ -34,19 +32,26 @@ import cv2
 def time_synchronized():
     return time.time()
 
-names = ('person', 'bicycle', 'car', 'motorcycle', 'airplane', \
-    'bus', 'train', 'truck', 'boat', 'traffic light', 'fire hydrant',\
-    'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', \
-    'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe',\
-    'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', \
-    'frisbee', 'skis', 'snowboard', 'sports ball', 'kite',\
-    'baseball bat', 'baseball glove', 'skateboard', 'surfboard',\
-    'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', \
-    'spoon', 'bowl', 'banana', 'apple', 'sandwich', 'orange', 'broccoli',\
-    'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant',\
-    'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',\
-    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', \
-    'teddy bear', 'hair drier', 'toothbrush')
+class ValSamples:
+    """The dataset's val split, yielded one sample at a time as the (img, targets, path, shapes) tuple below.
+
+    rect=False letterboxes to a square imgsz because the engine's input is fixed at that size.
+    """
+
+    def __init__(self, data_yaml, imgsz=640, stride=32):
+        cfg, data = setup_cfg(data_yaml)
+        cfg.imgsz = imgsz
+        self.dataset = build_yolo_dataset(cfg, data['val'], 1, data, mode='val', rect=False, stride=stride)
+        self.names = data['names']
+        self.nc = data['nc']
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __iter__(self):
+        for s in self.dataset:
+            targets = torch.cat([s['batch_idx'].unsqueeze(1), s['cls'], s['bboxes']], 1)
+            yield s['img'], targets, s['im_file'], (s['ori_shape'], s['ratio_pad'])
 
 class HostDeviceMem(object):
     def __init__(self, host_mem, device_mem):
@@ -174,12 +179,7 @@ def test(data,
     gs = 32
 
     # Configure
-    if isinstance(data, str):
-        is_coco = data.endswith('cocotest.yaml')
-        with open(data) as f:
-            data = yaml.load(f, Loader=yaml.SafeLoader)
-    # check_dataset(data)  # check
-    nc = 80  # number of classes
+    is_coco = isinstance(data, str) and data.endswith('cocotest.yaml')
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
 
@@ -191,9 +191,8 @@ def test(data,
     if not training:
         # if device.type != 'cpu':
         #     model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-        task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        dataloader = create_dataloader(data["path"], imgsz, batch_size, gs, opt, pad=0.5, rect=True, workers=0,
-                                       prefix=colorstr(f'{task}: '))[1]
+        dataloader = ValSamples(data, imgsz, gs)
+    nc, names = dataloader.nc, dataloader.names
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
     # coco91class = coco80_to_coco91_class()
