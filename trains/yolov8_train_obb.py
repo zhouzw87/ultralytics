@@ -3,7 +3,7 @@ from ultralytics import YOLO
 # Load a model
 model = YOLO('../ultralytics/cfg/models/v8/yolov8m-obb.yaml').load('pretrains/yolov8m-obb.pt')
 # Train the model
-model.train(data='../ultralytics/cfg/datasets/custom_plate.yaml', epochs=100, imgsz=640, batch=48,
+model.train(data='datasets/custom_plate.yaml', epochs=100, imgsz=640, batch=48,
             save_dir='runs/detect',save_period=10, device=[0,1])
 
 # model = YOLO("../runs/obb/train/weights/last.pt")

@@ -1,13 +1,13 @@
 from ultralytics import YOLO
 
 # Load a model
-# model = YOLO('../ultralytics/cfg/models/v8/yolov8m.yaml').load('pretrains/yolov8m.pt')
-# model.train(data='../ultralytics/cfg/datasets/custom_vehicle.yaml', epochs=200, imgsz=640, batch=16,
-#             project='vehicle1.4',save_period=1, device=0,
-#             degrees=5.0,shear=5.0,perspective=0.0002,mixup=0.2,copy_paste=0.2)
+model = YOLO('../ultralytics/cfg/models/v8/yolov8m.yaml').load('pretrains/yolov8m.pt')
+model.train(data='datasets/custom_cap.yaml', epochs=150, imgsz=640, batch=16,
+            project='cap1.2',save_period=1, device=0,
+            degrees=5.0,shear=5.0,perspective=0.0002,mixup=0.2,copy_paste=0.2)
 
-model = YOLO('../trains/vehicle1.4/train2/weights/last.pt')
-model.train(resume=True)
+# model = YOLO('../trains/vehicle1.4/train2/weights/last.pt')
+# model.train(resume=True)
 
 # from ultralytics.utils.downloads import download
 # from pathlib import Path

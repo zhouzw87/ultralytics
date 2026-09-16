@@ -18,7 +18,7 @@ from ultralytics.utils.metrics import box_iou
 # from models.yolo import Model
 # from models.experimental import attempt_load
 # from utils.datasets import create_dataloader
-from ultralytics.utils.ops import non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy
+from ultralytics.utils.ops import non_max_suppression, scale_boxes, xyxy2xywh, xywh2xyxy
 from metrics import bbox_iou,ap_per_class,ConfusionMatrix
 from ultralytics.utils.plotting import plot_images, output_to_target
 # from utils.torch_utils import select_device, TracedModel
@@ -248,7 +248,7 @@ def test(data,
 
             # Predictions
             predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
+            scale_boxes(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
 
             # Append to text file
             if save_txt:
@@ -291,7 +291,7 @@ def test(data,
 
                 # target boxes
                 tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
+                scale_boxes(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
                 if plots:
                     confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
 

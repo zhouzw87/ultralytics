@@ -153,6 +153,10 @@ runs/
 wandb/
 .DS_Store
 
+# Inference/eval dumps and interrupted downloads
+*_predictions.json
+*.part
+
 # Neural Network weights -----------------------------------------------------------------------------------------------
 weights/
 *.weights

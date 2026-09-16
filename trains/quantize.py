@@ -108,7 +108,8 @@ def replace_to_quantization_module(model: torch.nn.Module, ignore_policy: Union[
     def recursive_and_replace_module(module, prefix=""):
         for name in module._modules:
             submodule = module._modules[name]
-            # print("module._modules:", name,submodule)
+            if submodule is None:  # fuse() drops the one2many head of end2end models
+                continue
             path = name if prefix == "" else prefix + "." + name
             recursive_and_replace_module(submodule, path)
 

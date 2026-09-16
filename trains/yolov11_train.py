@@ -3,7 +3,7 @@ from ultralytics import YOLO
 # Load a model
 model = YOLO('../ultralytics/cfg/models/11/yolo11l.yaml').load('pretrains/yolo11l.pt')
 # Train the model
-model.train(data='../ultralytics/cfg/datasets/custom_people.yaml', epochs=100, imgsz=640, batch=32,
+model.train(data='datasets/custom_people.yaml', epochs=100, imgsz=640, batch=32,
             save_dir='runs/detect',save_period=10, device=[0,1])
 
 

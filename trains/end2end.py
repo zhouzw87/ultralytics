@@ -293,3 +293,15 @@ class TransOut(nn.Module):
         x = self.model(x)
         x = x.permute(0,2,1)
         return x
+
+class SplitOut(nn.Module):
+    '''export onnx with boxes, best score and class id as separate outputs, leaving NMS to the runtime.'''
+    def __init__(self, model, device=None):
+        super().__init__()
+        device = device if device else torch.device('cpu')
+        self.model = model.to(device)
+
+    def forward(self, x):
+        x = self.model(x)
+        boxes, scores = x[:, :4], x[:, 4:]
+        return boxes.permute(0, 2, 1), scores.max(1).values, scores.argmax(1)

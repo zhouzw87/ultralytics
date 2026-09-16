@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
+import torch
+
+from ultralytics.nn.modules import Detect
 from ultralytics.utils import IS_COLAB, LOGGER, YAML
 
 
@@ -11,6 +15,22 @@ def _check_rknn_return(ret, name: str):
     """Raise a RuntimeError if an RKNN API call failed."""
     if ret not in {0, None}:
         raise RuntimeError(f"RKNN {name} failed with return code {ret}.")
+
+
+def rknn_wrapper(model: torch.nn.Module) -> torch.nn.Module:
+    """Make Detect heads emit undecoded per-scale maps, for RKNN graphs that decode on the host CPU."""
+    for m in model.modules():
+        if isinstance(m, Detect):
+            if type(m) is not Detect:  # Segment/Pose/OBB also emit masks, keypoints or angles
+                raise TypeError(f"RKNN raw outputs support the detect head only, got {type(m).__name__}.")
+            m.forward = types.MethodType(_rknn_forward, m)
+    return model
+
+
+def _rknn_forward(self, x: list[torch.Tensor]) -> tuple[torch.Tensor, ...]:
+    """Return raw box and class maps per scale as (reg1, cls1, reg2, cls2, ...)."""
+    heads = self.one2one if self.end2end else self.one2many
+    return tuple(t for i in range(self.nl) for t in (heads["box_head"][i](x[i]), heads["cls_head"][i](x[i])))
 
 
 def onnx2rknn(

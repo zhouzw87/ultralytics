@@ -10,21 +10,21 @@ from copy import deepcopy
 from ultralytics.cfg import get_cfg
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.downloads import attempt_download_asset as attempt_download
-from ultralytics.nn.modules import Conv
+from ultralytics.nn.modules import Conv, Detect
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.utils import clean_url, emojis
 from ultralytics.utils import LOGGER
 from ultralytics.utils.torch_utils import init_seeds
 from ultralytics.models import yolo
-from ultralytics.utils.checks import check_imgsz, check_requirements
+from ultralytics.utils.checks import check_requirements
 from ultralytics.utils import colorstr
 
 import quantize
 
 init_seeds(2023)
 cfg = get_cfg("../ultralytics/cfg/default.yaml")
-cfg.data = "../ultralytics/cfg/datasets/custom_peoplecar.yaml"
+cfg.data = "datasets/custom_peoplecar.yaml"
 cfg.batch = 16
 cfg.mode = "export"
 print("torch.__version__:  ", torch.__version__)
@@ -89,54 +89,74 @@ def get_dataloader(cfg, dataset_path, batch_size=16, mode='train', gs=32):
 
 
 
+OUTPUT_NAMES = {  # each output layout is mutually exclusive and decides the ONNX output names
+    'raw': ['output0'],
+    'transpose': ['output0'],
+    'end2end': ['num_dets', 'det_boxes', 'det_scores', 'det_classes'],
+    'split': ['bbox', 'conf', 'class_id'],
+    'rknn': [],  # one reg/cls pair per detection scale, derived from the head below
+}
+
+
 def export_onnx(model: DetectionModel, save_file, size=640, dynamic_batch=False,
-                end2end=False,simplify=False, ort=False,rknn=False, transoutput=False,prefix=colorstr('ONNX:')):
+                output='raw', simplify=False, ort=False, prefix=colorstr('ONNX:')):
     requirements = ['onnx>=1.12.0']
     check_requirements(requirements)
 
     device = next(model.parameters()).device
+    detects = [m for m in model.modules() if isinstance(m, Detect)]
+
+    if output in {'end2end', 'transpose', 'split'} and any(m.end2end for m in detects):
+        raise ValueError(f"output='{output}' needs the raw (batch, 4 + nc, anchors) head output, but this checkpoint "
+                         f"is end-to-end and already returns (batch, max_det, 6). Use output='raw' or 'rknn'.")
+
+    flags = [(m.export, m.format, m.dynamic) for m in detects]
+    training = model.training
+    for m in detects:  # trace in export mode, otherwise Detect also returns its internal preds
+        m.export, m.format, m.dynamic = True, 'onnx', dynamic_batch
+    model.eval()  # QAT checkpoints are saved mid-finetune, so they come back in train mode
 
     batch_size = 1
-    imgsz = check_imgsz(cfg.imgsz, stride=model.stride, min_dim=2)
     input = torch.zeros(batch_size, 3, size, size).to(device)
 
+    output_names = OUTPUT_NAMES[output] or [f'{k}{i + 1}' for i in range(detects[0].nl) for k in ('reg', 'cls')]
     dynamic_axes = None
     if dynamic_batch:
         batch_size = 'batch'
-        dynamic_axes = { 'images' :{0:'batch',2:"height",3:"width",}}
-        if end2end:
-            output_axes = { 'num_dets': {0: 'batch'},'det_boxes': {0: 'batch'},'det_scores': {0: 'batch'},'det_classes': {0: 'batch'}}
-        elif rknn:
-            output_axes = { 'reg1': {0: 'batch'},'cls1': {0: 'batch'},'reg2': {0: 'batch'},'cls2': {0: 'batch'}, 'reg3': {0: 'batch'},'cls3': {0: 'batch'}}
-        else:
-            output_axes = {'outputs': {0: 'batch'}, }
-        dynamic_axes.update(output_axes)
-    if end2end:
-        output_names = ['num_dets', 'det_boxes', 'det_scores', 'det_classes']
-    elif rknn:
-        output_names = ['reg1', 'cls1', 'reg2', 'cls2','reg3', 'cls3']
-    else:
-        output_names =  ['output0']
+        dynamic_axes = {'images': {0: 'batch', 2: "height", 3: "width"}}
+        dynamic_axes.update({name: {0: 'batch'} for name in output_names})
 
-    if end2end:
+    if output == 'end2end':
         from end2end import End2End
         model = End2End(model, max_obj=100, iou_thres=0.45,score_thres=0.5,
                         device=device, ort=ort, trt_version=8, with_preprocess=False)
-    if end2end==False and transoutput:
+    elif output == 'transpose':
         from end2end import TransOut
         model = TransOut(model, device=device)
-    quantize.export_onnx(model.cpu() if dynamic_batch else model,  # dynamic=True only compatible with cpu
-                         input.cpu() if dynamic_batch else input,
+    elif output == 'split':
+        from end2end import SplitOut
+        model = SplitOut(model, device=device)
+    elif output == 'rknn':
+        from ultralytics.utils.export.rknn import rknn_wrapper
+        model = rknn_wrapper(model)
+    if dynamic_batch:  # dynamic=True only compatible with cpu
+        model, input = model.cpu(), input.cpu()
+    with torch.no_grad():  # warm up so make_anchors runs outside the trace, which keeps the anchors fp32
+        model(input)
+    quantize.export_onnx(model, input,
                          save_file,verbose=False,opset_version=13,do_constant_folding=True,
                          input_names=['images'],
                          output_names=output_names,
                          dynamic_axes=dynamic_axes
                          )
+    for m, flag in zip(detects, flags):  # run_qat exports mid-finetune, so leave the live model as we found it
+        m.export, m.format, m.dynamic = flag
+    model.train(training)
     # Simplify
     onnx_model = onnx.load(save_file)  # load onnx model
     onnx.checker.check_model(onnx_model)  # check onnx model
     # Fix output shape
-    if end2end and not ort:
+    if output == 'end2end' and not ort:
         topk_all=100
         shapes = [batch_size, 1, batch_size, topk_all, 4,
                   batch_size, topk_all, batch_size, topk_all]
@@ -224,7 +244,7 @@ def graphsurgeon_model(onnx_model):
     onnx.save(gs.export_onnx(graph), "modified.onnx")
     print(f"Save onnx to modified.onnx")
 
-def run_export(weight, save, size, dynamic, noqadd,end2end,simplify,graphsurgeon,ort,rknn,transoutput):
+def run_export(weight, save, size, dynamic, noqadd, output, simplify, graphsurgeon, ort):
     quantize.initialize()
     if save is None:
         name = os.path.basename(weight)
@@ -237,7 +257,7 @@ def run_export(weight, save, size, dynamic, noqadd,end2end,simplify,graphsurgeon
         quantize.replace_bottleneck_forward(model)
         quantize.apply_custom_rules_to_quantizer(model, export_onnx)
 
-    export_onnx(model, save, size,dynamic,end2end,simplify,ort,rknn,transoutput)
+    export_onnx(model, save, size, dynamic, output, simplify, ort)
 
     if graphsurgeon:
         graphsurgeon_model(save)
@@ -247,10 +267,11 @@ def run_sensitive_analysis(weight, device, cocodir, summary_save):
     quantize.initialize()
     device = torch.device(device)
     model = load_yolov8_model(weight, device)
-    train_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='train')
+    # Calibrate on train images, and in 'val' mode so augmentation does not skew the activation ranges
+    calib_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='val')
     val_dataloader = get_dataloader(cfg, cocodir + "images/val", batch_size=cfg.batch, mode='val')
     quantize.replace_to_quantization_module(model)
-    quantize.calibrate_model(model, train_dataloader, device)
+    quantize.calibrate_model(model, calib_dataloader, device)
 
     summary = SummaryTool(summary_save)
     print("Evaluate PTQ...")
@@ -290,13 +311,18 @@ def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
     print("Load dataset ....")
     train_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='train')
     val_dataloader = get_dataloader(cfg, cocodir + "images/val", batch_size=cfg.batch, mode='val')
+    # Calibrate on train images, and in 'val' mode so augmentation does not skew the activation ranges
+    calib_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='val')
     print("Insert QDQ ....")
     quantize.replace_bottleneck_forward(model)
+    if ignore_policy is None:  # Detect head index varies per model, so derive it instead of hardcoding
+        ignore_policy = rf"model\.{len(model.model) - 1}\..*"
+        print(f"Keep Detect head in high precision: {ignore_policy}")
     quantize.replace_to_quantization_module(model,ignore_policy)
     print("Apply custom_rules ....")
     quantize.apply_custom_rules_to_quantizer(model, export_onnx)
     print("Calibrate model ....")
-    quantize.calibrate_model(model, val_dataloader, device)
+    quantize.calibrate_model(model, calib_dataloader, device)
 
     json_save_dir = "." if os.path.dirname(save_ptq) == "" else os.path.dirname(save_ptq)
     summary_file = os.path.join(json_save_dir, "summary.json")
