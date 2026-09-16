@@ -22,12 +22,13 @@ from ultralytics.utils import colorstr
 
 import quantize
 
-init_seeds(2023)
-cfg = get_cfg("../ultralytics/cfg/default.yaml")
-cfg.data = "datasets/custom_peoplecar.yaml"
-cfg.batch = 16
-cfg.mode = "export"
-print("torch.__version__:  ", torch.__version__)
+def setup_cfg(data, batch=16):
+    """Seed and build the config the dataloaders and validator need, per run rather than at import."""
+    init_seeds(2023)
+    cfg = get_cfg()
+    cfg.data, cfg.batch, cfg.mode = data, batch, "export"
+    return cfg
+
 
 class SummaryTool:
     def __init__(self, file):
@@ -40,7 +41,7 @@ class SummaryTool:
 
 
 # from ultralytics.engine.model import Model
-def load_yolov8_model(weight, device) -> DetectionModel:
+def load_yolov8_model(weight, device, cfg) -> DetectionModel:
     attempt_download(weight)
     model = torch.load(weight, map_location=device)["model"]
     for m in model.modules():
@@ -70,7 +71,7 @@ def build_dataset(cfg, img_path, mode='train', batch=None, gs=32):
         raise RuntimeError(emojis(f"Dataset '{clean_url(cfg.data)}' error ❌ {e}")) from e
     return build_yolo_dataset(cfg, img_path, batch, data, mode=mode, rect=mode == 'val', stride=gs)
 
-def evaluate_coco(model, val_dataloader):
+def evaluate_coco(model, val_dataloader, cfg):
     validator = yolo.detect.DetectionValidator(dataloader=val_dataloader, args=cfg)
     val_model = deepcopy(model)  # deepcopy
     mAP = validator(model=val_model)["metrics/mAP50-95(B)"]
@@ -263,10 +264,11 @@ def run_export(weight, save, size, dynamic, noqadd, output, simplify, graphsurge
         graphsurgeon_model(save)
 
 
-def run_sensitive_analysis(weight, device, cocodir, summary_save):
+def run_sensitive_analysis(weight, data, device, cocodir, summary_save):
     quantize.initialize()
+    cfg = setup_cfg(data)
     device = torch.device(device)
-    model = load_yolov8_model(weight, device)
+    model = load_yolov8_model(weight, device, cfg)
     # Calibrate on train images, and in 'val' mode so augmentation does not skew the activation ranges
     calib_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='val')
     val_dataloader = get_dataloader(cfg, cocodir + "images/val", batch_size=cfg.batch, mode='val')
@@ -275,7 +277,7 @@ def run_sensitive_analysis(weight, device, cocodir, summary_save):
 
     summary = SummaryTool(summary_save)
     print("Evaluate PTQ...")
-    ap = evaluate_coco(model, val_dataloader)
+    ap = evaluate_coco(model, val_dataloader, cfg)
     summary.append([ap, "PTQ"])
 
     print("Sensitive analysis by each layer...")
@@ -284,7 +286,7 @@ def run_sensitive_analysis(weight, device, cocodir, summary_save):
         if quantize.have_quantizer(layer):
             print(f"Quantization disable model.{i}")
             quantize.disable_quantization(layer).apply()
-            ap = evaluate_coco(model, val_dataloader)
+            ap = evaluate_coco(model, val_dataloader, cfg)
             summary.append([ap, f"model.{i}"])
             quantize.enable_quantization(layer).apply()
         else:
@@ -295,9 +297,10 @@ def run_sensitive_analysis(weight, device, cocodir, summary_save):
     for n, (ap, name) in enumerate(summary[:10]):
         print(f"Top{n}: Using fp16 {name}, ap = {ap:.5f}")
 
-def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
+def run_qat(weight, data, cocodir, device, ignore_policy, save_ptq, save_qat,
             supervision_stride, iters, eval_origin,eval_ptq):
     quantize.initialize()
+    cfg = setup_cfg(data)
 
     if save_ptq and os.path.dirname(save_ptq) != "":
         os.makedirs(os.path.dirname(save_ptq), exist_ok=True)
@@ -307,7 +310,7 @@ def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
 
     device = torch.device(device)
     print("Load model ....")
-    model = load_yolov8_model(weight, device)
+    model = load_yolov8_model(weight, device, cfg)
     print("Load dataset ....")
     train_dataloader = get_dataloader(cfg, cocodir + "images/train", batch_size=cfg.batch, mode='train')
     val_dataloader = get_dataloader(cfg, cocodir + "images/val", batch_size=cfg.batch, mode='val')
@@ -331,12 +334,12 @@ def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
     if eval_origin:
         print("Evaluate Origin...")
         with quantize.disable_quantization(model):
-            ap = evaluate_coco(model, val_dataloader)
+            ap = evaluate_coco(model, val_dataloader, cfg)
             summary.append(["Origin", ap])
 
     if eval_ptq:
         print("Evaluate PTQ...")
-        ap = evaluate_coco(model, val_dataloader)
+        ap = evaluate_coco(model, val_dataloader, cfg)
         summary.append(["PTQ", ap])
 
     if save_ptq:
@@ -350,7 +353,7 @@ def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
     best_ap = 0
     def per_epoch(model, epoch, lr):
         nonlocal best_ap
-        ap = evaluate_coco(model, val_dataloader)
+        ap = evaluate_coco(model, val_dataloader, cfg)
         summary.append([f"QAT{epoch}", ap])
 
         if ap > best_ap:
@@ -387,8 +390,9 @@ def run_qat(weight, cocodir, device, ignore_policy, save_ptq, save_qat,
         preprocess=preprocess_batch, supervision_policy=supervision_policy())
 
 
-def run_test(weight, device, cocodir):
+def run_test(weight, data, device, cocodir):
+    cfg = setup_cfg(data)
     device = torch.device(device)
-    model = load_yolov8_model(weight, device)
+    model = load_yolov8_model(weight, device, cfg)
     val_dataloader = get_dataloader(cfg, cocodir + "images/val", batch_size=cfg.batch, mode='val')
-    evaluate_coco(model, val_dataloader)
+    evaluate_coco(model, val_dataloader, cfg)

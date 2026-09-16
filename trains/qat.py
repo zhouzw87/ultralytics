@@ -11,6 +11,8 @@ if __name__ == "__main__":
     # finetune / sensitive / test
     parser.add_argument("--cocodir", type=str, default="/disk1/PeopleCar/v4/",
                         help="dataset root holding images/train and images/val")
+    parser.add_argument("--data", type=str, default=None,
+                        help="dataset yaml supplying the class names, e.g. datasets/custom_cap.yaml")
     parser.add_argument("--ptq", type=str, default="ptq.pt", help="PTQ checkpoint to save")
     parser.add_argument("--qat", type=str, default="qat.pt", help="QAT checkpoint to save")
     parser.add_argument("--no-eval-origin", dest="eval_origin", action="store_false", help="skip the FP32 baseline eval")
@@ -32,18 +34,20 @@ if __name__ == "__main__":
     parser.add_argument("--ort", action="store_true", help="output=end2end only: ONNX Runtime NMS instead of TensorRT")
 
     args = parser.parse_args()
+    if args.mode != "export" and not args.data:
+        parser.error(f"--data is required for mode={args.mode}; it supplies the class names")
 
     if args.mode == "export":
         run_export(args.weight, args.save, args.size, args.dynamic, not args.qadd,
                    args.output, args.simplify, args.graphsurgeon, args.ort)
     elif args.mode == "finetune":
-        run_qat(args.weight, args.cocodir, args.device, args.ignore_policy,
+        run_qat(args.weight, args.data, args.cocodir, args.device, args.ignore_policy,
                 args.ptq, args.qat, args.supervision_stride, args.iters,
                 args.eval_origin, args.eval_ptq)
     elif args.mode == "sensitive":
-        run_sensitive_analysis(args.weight, args.device, args.cocodir, args.summary)
+        run_sensitive_analysis(args.weight, args.data, args.device, args.cocodir, args.summary)
     else:
-        run_test(args.weight, args.device, args.cocodir)
+        run_test(args.weight, args.data, args.device, args.cocodir)
 
 # ./trtexec --onnx=yolov8m.onnx --saveEngine=yolov8m.engine --minShapes='images':1x3x640x640 --optShapes='images':16x3x640x640 --maxShapes='images':16x3x640x640 --explicitBatch --fp16
 # ./trtexec --onnx=qat.onnx --saveEngine=qat.engine --minShapes='images':1x3x640x640 --optShapes='images':16x3x640x640 --maxShapes='images':16x3x640x640 --explicitBatch --fp16
