@@ -193,15 +193,6 @@ def calibrate_model(model: torch.nn.Module, dataloader, device, num_batch=1024):
     collect_stats(model, dataloader, device, num_batch=num_batch)
     compute_amax(model, method="mse")
 
-def export_onnx(model, input, file, *args, **kwargs):
-    quant_nn.TensorQuantizer.use_fb_fake_quant = True
-
-    model.eval()
-    with torch.no_grad():
-        torch.onnx.export(model, input, file, *args, **kwargs)
-
-    quant_nn.TensorQuantizer.use_fb_fake_quant = False
-    
 def finetune(model: torch.nn.Module, train_dataloader, per_epoch_callback: Callable = None, preprocess: Callable = None,
             nepochs=10, early_exit_batchs_per_epoch=1024, lrschedule: Dict = None, fp16=True, learningrate=1e-4,
             supervision_policy: Callable = None):
