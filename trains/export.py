@@ -116,74 +116,47 @@ def export_onnx(model: DetectionModel, save_file, size=640, dynamic_batch=False,
     print(f"Save onnx to {save_file}")
 
 
-def graphsurgeon_model(onnx_model):
-    graph = gs.import_onnx(onnx.load(onnx_model))
-    nodes = graph.nodes
-    mul_nodes = [node for node in graph.nodes if node.op == "Mul"]
-    # mul_nodes = [node for node in graph.nodes if
-    #              node.op == "Mul" and node.i(0).op == "BatchNormalization" and node.i(1).op == "Sigmoid"]
+def graphsurgeon_model(save_file):
+    """Rewrite a QAT graph in place so TensorRT can fuse it, sharing Q/DQ across an activation's branches."""
+    graph = gs.import_onnx(onnx.load(save_file))
+    if not any(node.op == "DequantizeLinear" for node in graph.nodes):
+        raise ValueError("--graphsurgeon expects a QAT graph with Q/DQ nodes, but this export has none")
 
-    many_outputs_mul_nodes = []
-    for node in mul_nodes:  # convolution mul node for silu activation.
-        try:
-            for i in range(99):
-                node.o(i)
-        except:
-            if i > 1:
-                mul_nodename_outnum = {"node": node, "out_num": i}
-                many_outputs_mul_nodes.append(mul_nodename_outnum)
+    # A SiLU Mul feeding several consumers gets one QuantizeLinear per branch, each with its own scale,
+    # which TensorRT cannot fuse. Rewire the extra branches onto the first branch's DQ so they share it.
+    for node in graph.nodes:
+        if node.op != "Mul":
+            continue
+        consumers = node.outputs[0].outputs
+        if len(consumers) < 2:
+            continue
+        shared_dq = node.o(0).o(0).outputs[0]  # output of the first branch's DequantizeLinear
 
-    for node_dict in many_outputs_mul_nodes:
-        if node_dict["out_num"] == 2:
-            if node_dict["node"].o(0).op == "QuantizeLinear" and node_dict["node"].o(1).op == "QuantizeLinear":
-                if node_dict["node"].o(1).o(0).o(0).op == "Concat":
-                    concat_dq_out_name = node_dict["node"].o(1).o(0).outputs[0].name
-                    for i, concat_input in enumerate(node_dict["node"].o(1).o(0).o(0).inputs):
-                        if concat_input.name == concat_dq_out_name:
-                            node_dict["node"].o(1).o(0).o(0).inputs[i] = node_dict["node"].o(0).o(0).outputs[0]  # concat 4개
-                else:
-                    node_dict["node"].o(1).o(0).o(0).inputs[0] = node_dict["node"].o(0).o(0).outputs[0]  # 그 외
+        if len(consumers) == 2 and consumers[0].op == "QuantizeLinear":
+            if consumers[1].op == "QuantizeLinear":
+                target = node.o(1).o(0).o(0)  # consumer past the second branch's Q/DQ pair
+                replaced = node.o(1).o(0).outputs[0].name
+            elif consumers[1].op == "Concat":
+                target = consumers[1]
+                replaced = consumers[0].inputs[0].name
+            else:
+                continue
+            if target.op == "Concat":  # a Concat takes the branch at whichever input index it sits on
+                for i, inp in enumerate(target.inputs):
+                    if inp.name == replaced:
+                        target.inputs[i] = shared_dq
+            else:
+                target.inputs[0] = shared_dq
+        elif len(consumers) in {3, 4}:  # with 4, branch 1 is an unmerged Shape node and is left alone
+            for branch in ([2, 1] if len(consumers) == 3 else [3, 2]):
+                node.o(branch).o(0).o(0).inputs[0] = shared_dq
 
-            elif node_dict["node"].o(0).op == "QuantizeLinear" and node_dict["node"].o(1).op == "Concat":
-                concat_dq_out_name = node_dict["node"].outputs[0].outputs[0].inputs[0].name
-                for i, concat_input in enumerate(node_dict["node"].outputs[0].outputs[1].inputs):
-                    if concat_input.name == concat_dq_out_name:
-                        node_dict["node"].outputs[0].outputs[1].inputs[i] = \
-                        node_dict["node"].outputs[0].outputs[0].o().outputs[0]  # concat 4개
-
-        elif node_dict["out_num"] == 3:
-            node_dict["node"].o(2).o(0).o(0).inputs[0] = node_dict["node"].o(0).o(0).outputs[0]
-            node_dict["node"].o(1).o(0).o(0).inputs[0] = node_dict["node"].o(0).o(0).outputs[0]
-
-        elif node_dict["out_num"] == 4:  # shape node not merged
-            node_dict["node"].o(3).o(0).o(0).inputs[0] = node_dict["node"].o(0).o(0).outputs[0]
-            node_dict["node"].o(2).o(0).o(0).inputs[0] = node_dict["node"].o(0).o(0).outputs[0]
-
-    # add_nodes = [node for node in graph.nodes if node.op == "Add"]
-    # many_outputs_add_nodes = []
-    # for node in add_nodes:  # convolution mul node for silu activation.
-    #     try:
-    #         for i in range(99):
-    #             node.o(i)
-    #     except:
-    #         if i > 1 and node.o().op == "QuantizeLinear":
-    #             add_nodename_outnum = {"node": node, "out_num": i}
-    #             many_outputs_add_nodes.append(add_nodename_outnum)
-    #
-    # for node_dict in many_outputs_add_nodes:
-    #     if node_dict["node"].outputs[0].outputs[0].op == "QuantizeLinear" and node_dict["node"].outputs[0].outputs[2].op == "Concat":
-    #         concat_dq_out_name = node_dict["node"].outputs[0].outputs[0].inputs[0].name
-    #         for i, concat_input in enumerate(node_dict["node"].outputs[0].outputs[1].inputs):
-    #             if concat_input.name == concat_dq_out_name:
-    #                 node_dict["node"].outputs[0].outputs[1].inputs[i] = \
-    #                 node_dict["node"].outputs[0].outputs[0].o().outputs[0]  # concat 4개
-
-    conv_nodes = [node for node in graph.nodes if node.op == "Conv"]
-    conv_nodes[-1].inputs[0] = conv_nodes[-1].i().i().inputs[0]  # dfl block input
-    conv_nodes[-1].inputs[1] = conv_nodes[-1].i(1).i().inputs[0]  # dfl block weight
+    dfl = [node for node in graph.nodes if node.op == "Conv"][-1]  # DFL is the last Conv in the graph
+    dfl.inputs[0] = dfl.i().i().inputs[0]  # bypass the input Q/DQ
+    dfl.inputs[1] = dfl.i(1).i().inputs[0]  # bypass the weight Q/DQ
     graph.cleanup().toposort()
-    onnx.save(gs.export_onnx(graph), "modified.onnx")
-    print(f"Save onnx to modified.onnx")
+    onnx.save(gs.export_onnx(graph), save_file)
+    print(f"Save onnx to {save_file}")
 
 def run_export(weight, save, size, dynamic, noqadd, output, simplify, graphsurgeon, ort):
     if not noqadd and quantize is None:
