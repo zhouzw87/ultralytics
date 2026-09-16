@@ -5,6 +5,12 @@ from ultralytics import YOLO
 # success = model.export(format="onnx", opset=13, simplify=False)  # export the model to onnx format
 # assert success
 
-model = YOLO("../runs/detect/train_peoplecar_yolov8m/weights/last.pt")  # load a pretrained model (recommended for training)
-success = model.export(format="onnx", opset=13, simplify=False,dynamic=False)  # export the model to onnx format
-assert success
+# model = YOLO("../runs/detect/train_peoplecar_yolov8m/weights/last.pt")  # load a pretrained model (recommended for training)
+# success = model.export(format="onnx", opset=13, simplify=False,dynamic=False)  # export the model to onnx format
+# assert success
+
+# Load a model
+model = YOLO("../trains/runs/detect/cap1.0/train-2/weights/best.pt")  # load a custom-trained model
+
+# Export the model
+model.export(format="onnx",opset=13, simplify=False,dynamic=True,end2end=True)
